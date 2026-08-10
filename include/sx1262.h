@@ -28,6 +28,11 @@
 // so the ground station can reject packets from an old firmware build.
 static const uint8_t ORION_PACKET_MAGIC = 0xA5;
 
+// Set/team identifier sent in every packet. ORION_ID_LEN includes the null
+// terminator, so the name must be at most ORION_ID_LEN-1 characters.
+#define ORION_ID_LEN 10
+static const char ORION_ID[ORION_ID_LEN] = "Jarvis";
+
 // Flight state codes - shared verbatim with the ground station decoder.
 enum FlightState : uint8_t {
   STATE_IDLE    = 0,
@@ -44,8 +49,9 @@ enum FlightState : uint8_t {
  * struct to decode it. lat/lon keep u-blox native scaling (degrees * 1e7) to
  * avoid the precision loss of packing coordinates into a 32-bit float. */
 struct __attribute__((packed)) TelemetryPacket {
-  uint8_t  magic;        // ORION_PACKET_MAGIC
-  uint16_t seq;          // incrementing packet counter (wraps at 65535)
+  uint8_t  magic;              // ORION_PACKET_MAGIC
+  char     id[ORION_ID_LEN];   // set/team identifier (e.g. "Protsenko")
+  uint16_t seq;                // incrementing packet counter (wraps at 65535)
   uint32_t t_ms;         // flight-computer millis() at send time
   uint8_t  state;        // FlightState
 
@@ -102,5 +108,9 @@ bool radioBusy();
 
 // Number of packets whose transmission has been started (== next seq number).
 uint16_t radioPacketCount();
+
+// Read-only access to the current outgoing packet - e.g. to log the exact
+// bytes the radio sends to the ground station to the SD card.
+const TelemetryPacket& radioPacket();
 
 #endif // ORION_SX1262_H

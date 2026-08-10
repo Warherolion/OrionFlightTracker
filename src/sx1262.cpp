@@ -8,23 +8,40 @@
  * ========================================================================== */
 
 /* ---------------------------------------------------------------------------
- * PIN MAP - SET THESE TO YOUR OrionTracker PCB WIRING.
- * The SX1262 control lines below are GPIO; SCK/MISO/MOSI use the default SPI
- * bus (STM32F412RE: SPI1 = PA5/PA6/PA7). DIO1 must be an interrupt-capable pin
- * and must not share an EXTI line number with another interrupt pin you use
- * (e.g. PB7 = EXTI7, so avoid PA7/PC7 as interrupts elsewhere).
+ * PIN MAP - OrionTracker PCB wiring, SX1262 on SPI2.
+ *   SPI2 bus:  SCK = PB10, MISO = PC2, MOSI = PC3
+ *   Control:   NSS/CS = PC1, IRQ (DIO1) = PA2, BUSY = PA3, RST = PA0
+ *   RF switch: PA1 (external antenna TX/RX switch, MCU-controlled)
+ * DIO1 must be interrupt-capable and not share an EXTI line number with another
+ * interrupt pin (PA2 = EXTI2, so avoid PB2/PC2 as *interrupt* sources).
+ * NOTE: the schematic labels the IRQ line "DIO0"; the SX1262 IRQ RadioLib uses
+ * is DIO1, wired here to PA2.
  * ------------------------------------------------------------------------- */
+// SPI2 bus pins
+#ifndef SX1262_SCK
+#define SX1262_SCK   PB10
+#endif
+#ifndef SX1262_MISO
+#define SX1262_MISO  PC2
+#endif
+#ifndef SX1262_MOSI
+#define SX1262_MOSI  PC3
+#endif
+// Control lines
 #ifndef SX1262_NSS
-#define SX1262_NSS   PB6   // SPI chip-select (NSS)
+#define SX1262_NSS   PC1   // SPI chip-select (NSS/CS)
 #endif
 #ifndef SX1262_DIO1
-#define SX1262_DIO1  PB7   // IRQ line (TxDone)
+#define SX1262_DIO1  PA2   // IRQ line (schematic "DIO0")
 #endif
 #ifndef SX1262_RST
-#define SX1262_RST   PB8   // reset
+#define SX1262_RST   PA0   // reset
 #endif
 #ifndef SX1262_BUSY
-#define SX1262_BUSY  PB9   // busy
+#define SX1262_BUSY  PA3   // busy
+#endif
+#ifndef SX1262_RFSW
+#define SX1262_RFSW  PA1   // external RF (antenna) switch control
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -39,15 +56,31 @@
 #define LORA_SPREADING   7        // spreading factor (5..12)
 #define LORA_CODINGRATE  5        // coding rate 4/5
 #define LORA_TXPOWER     22       // dBm (SX1262 max is +22)
-#define LORA_SYNCWORD    0x34     // private-network sync word
+#define LORA_SYNCWORD    0x53     // private-network sync word (matches ground station)
 #define LORA_PREAMBLE    8        // preamble length (symbols)
 
 // ---------------------------------------------------------------------------
 // Module + internal state (file-scoped; the free-function API wraps this)
 // ---------------------------------------------------------------------------
 
-// RadioLib driver bound to the default SPI bus.
-static SX1262 radio = new Module(SX1262_NSS, SX1262_DIO1, SX1262_RST, SX1262_BUSY);
+// Dedicated SPI2 bus instance (STM32duino: SPIClass(MOSI, MISO, SCK)).
+static SPIClass spi2(SX1262_MOSI, SX1262_MISO, SX1262_SCK);
+
+// RadioLib driver bound to SPI2 (NSS, DIO1/IRQ, RST, BUSY, bus).
+static SX1262 radio = new Module(SX1262_NSS, SX1262_DIO1, SX1262_RST, SX1262_BUSY, spi2);
+
+// External RF switch (single MCU pin): drive one way for TX, the other for RX.
+// RADIOLIB_NC pads the unused pin slots (RadioLib wants RFSWITCH_MAX_PINS = 3).
+// !! VERIFY POLARITY against your PCB: this assumes HIGH = TX, LOW = RX. !!
+static const uint32_t rfswitch_pins[] = {
+  SX1262_RFSW, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC
+};
+static const Module::RfSwitchMode_t rfswitch_table[] = {
+  { Module::MODE_IDLE, { LOW,  LOW, LOW, LOW, LOW } },
+  { Module::MODE_RX,   { LOW,  LOW, LOW, LOW, LOW } },
+  { Module::MODE_TX,   { HIGH, LOW, LOW, LOW, LOW } },
+  END_OF_MODE_TABLE,
+};
 
 static TelemetryPacket txPacket;        // the packet currently being assembled
 static volatile bool   txDone = true;   // true when the radio is free to send
@@ -75,6 +108,12 @@ static bool setSyncWord(uint8_t sw) { return radio.setSyncWord(sw)     == RADIOL
 // ---------------------------------------------------------------------------
 
 bool radioInit() {
+  // Bring up the SPI2 bus with our pin mapping before touching the radio.
+  spi2.begin();
+
+  // Tell RadioLib how the external antenna switch is wired (before begin()).
+  radio.setRfSwitchTable(rfswitch_pins, rfswitch_table);
+
   // begin() resets the chip and sets the carrier frequency.
   if (radio.begin(LORA_FREQUENCY) != RADIOLIB_ERR_NONE) {
     return false;
@@ -100,6 +139,7 @@ bool radioInit() {
   // Zero the packet and stamp the constant header field.
   memset(&txPacket, 0, sizeof(txPacket));
   txPacket.magic  = ORION_PACKET_MAGIC;
+  memcpy(txPacket.id, ORION_ID, ORION_ID_LEN);   // stamp the set/team identifier
   txPacket.gpsAge = 0xFFFFFFFF;   // "no GPS update yet"
 
   txDone      = true;
@@ -185,4 +225,8 @@ bool radioBusy() {
 
 uint16_t radioPacketCount() {
   return seqCounter;
+}
+
+const TelemetryPacket& radioPacket() {
+  return txPacket;
 }
